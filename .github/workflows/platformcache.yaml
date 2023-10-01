@@ -1,0 +1,74 @@
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        type: string
+        default: builders
+        description: 'The package name to use for storing cached builders'
+      platform-files:
+        required: true
+        type: string
+        description: 'Paths to Dockerfiles to cache'
+      runs-on:
+        required: true
+        type: string
+    outputs:
+      platforms:
+        value: ${{jobs.d.outputs.platforms}}
+      platform-list:
+        value: ${{jobs.d.outputs.platform-list}}
+
+permissions:
+  packages: read
+  contents: read
+
+jobs:
+  d:
+    name: Discover Platforms
+    runs-on: ubuntu-latest
+    outputs:
+      missing-platforms: ${{steps.discover.outputs.missing-platforms}}
+      platforms: ${{steps.discover.outputs.platforms}}
+      platform-list: ${{steps.discover.outputs.platform-list}}
+    steps:
+      - uses: actions/checkout@v4
+        ## TODO: how can calling workflow's repo & ref be forwarded through?
+        with:
+          repository: AntelopeIO/platform-cache-workflow
+          ref: v1
+          path: platformdiscovery
+      - name: Discover Platforms
+        id: discover
+        uses: ./platformdiscovery/.github/actions/discover-platforms
+        with:
+          platform-files: ${{inputs.platform-files}}
+          password: ${{github.token}}
+          package-name: ${{inputs.package-name}}
+
+  build-platforms:
+    name: Build Platforms
+    needs: d
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{fromJSON(needs.d.outputs.missing-platforms)}}
+    runs-on: ${{matrix.platform == 'none' && 'ubuntu-latest' || fromJSON(inputs.runs-on)}}
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Login to Container Registry
+        if: matrix.platform != 'none'
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{github.repository_owner}}
+          password: ${{github.token}}
+      - name: Build and push
+        if: matrix.platform != 'none'
+        uses: docker/build-push-action@v3
+        with:
+          push: true
+          tags: ${{fromJSON(needs.d.outputs.platforms)[matrix.platform].image}}
+          file: ${{fromJSON(needs.d.outputs.platforms)[matrix.platform].file}}
+          target: ${{fromJSON(needs.d.outputs.platforms)[matrix.platform].target}}
